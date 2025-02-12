@@ -11,7 +11,7 @@ Import the package:
 
 ```go
 import (
-	cmap "github.com/annihilatorq/concurrent-map"
+	cmap "github.com/annihilatorq/concurrent-map@v1.1.0"
 )
 
 ```
