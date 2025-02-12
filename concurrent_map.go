@@ -3,10 +3,18 @@ package cmap
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sync"
 )
 
-var SHARD_COUNT = 32
+type Hasher[K any] func(key K) uint32
+
+var DefaultShardCount = runtime.NumCPU() * 2
+
+type Integer interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 | ~uint |
+		~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr
+}
 
 type Stringer interface {
 	fmt.Stringer
@@ -14,10 +22,10 @@ type Stringer interface {
 }
 
 // A "thread" safe map of type string:Anything.
-// To avoid lock bottlenecks this map is dived to several (SHARD_COUNT) map shards.
+// To avoid lock bottlenecks this map is dived to several (DefaultShardCount) map shards.
 type ConcurrentMap[K comparable, V any] struct {
-	shards   []*ConcurrentMapShared[K, V]
-	sharding func(key K) uint32
+	shards []*ConcurrentMapShared[K, V]
+	hasher func(key K) uint32
 }
 
 // A "thread" safe string to anything map.
@@ -26,35 +34,43 @@ type ConcurrentMapShared[K comparable, V any] struct {
 	sync.RWMutex // Read Write mutex, guards access to internal map.
 }
 
-func create[K comparable, V any](sharding func(key K) uint32) ConcurrentMap[K, V] {
-	m := ConcurrentMap[K, V]{
-		sharding: sharding,
-		shards:   make([]*ConcurrentMapShared[K, V], SHARD_COUNT),
+func NewString[V any](shardCount int) ConcurrentMap[string, V] {
+	return construct[string, V](fnv1a32Hash, shardCount)
+}
+
+func NewStringer[K Stringer, V any](shardCount int) ConcurrentMap[K, V] {
+	return construct[K, V](fnv1a32HashFromStringer[K], shardCount)
+}
+
+func NewInteger[K Integer, V any](shardCount int) ConcurrentMap[K, V] {
+	return construct[K, V](splitMix64Hash, shardCount)
+}
+
+func NewWithCustomHasher[K comparable, V any](hasherFunc Hasher[K], shardCount int) ConcurrentMap[K, V] {
+	return construct[K, V](hasherFunc, shardCount)
+}
+
+func construct[K comparable, V any](hasherFunc Hasher[K], shardCount int) ConcurrentMap[K, V] {
+	if shardCount == 0 {
+		shardCount = DefaultShardCount
 	}
-	for i := 0; i < SHARD_COUNT; i++ {
-		m.shards[i] = &ConcurrentMapShared[K, V]{items: make(map[K]V)}
+	ConcurrentMap := ConcurrentMap[K, V]{
+		shards: make([]*ConcurrentMapShared[K, V], shardCount),
+		hasher: hasherFunc,
 	}
-	return m
-}
-
-// Creates a new concurrent map.
-func New[V any]() ConcurrentMap[string, V] {
-	return create[string, V](fnv32)
-}
-
-// Creates a new concurrent map.
-func NewStringer[K Stringer, V any]() ConcurrentMap[K, V] {
-	return create[K, V](strfnv32[K])
-}
-
-// Creates a new concurrent map.
-func NewWithCustomShardingFunction[K comparable, V any](sharding func(key K) uint32) ConcurrentMap[K, V] {
-	return create[K, V](sharding)
+	for i := 0; i < shardCount; i++ {
+		ConcurrentMap.shards[i] = &ConcurrentMapShared[K, V]{items: make(map[K]V)}
+	}
+	return ConcurrentMap
 }
 
 // GetShard returns shard under given key
 func (m ConcurrentMap[K, V]) GetShard(key K) *ConcurrentMapShared[K, V] {
-	return m.shards[uint(m.sharding(key))%uint(SHARD_COUNT)]
+	return m.shards[uint(m.hasher(key))%uint(DefaultShardCount)]
+}
+
+func (m ConcurrentMap[K, V]) ShardCount() int {
+	return len(m.shards)
 }
 
 func (m ConcurrentMap[K, V]) MSet(data map[K]V) {
@@ -67,12 +83,23 @@ func (m ConcurrentMap[K, V]) MSet(data map[K]V) {
 }
 
 // Sets the given value under the specified key.
-func (m ConcurrentMap[K, V]) Set(key K, value V) {
-	// Get map shard.
+func (m ConcurrentMap[K, V]) Store(key K, value V) {
 	shard := m.GetShard(key)
 	shard.Lock()
 	shard.items[key] = value
 	shard.Unlock()
+}
+
+func (m ConcurrentMap[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
+	shard := m.GetShard(key)
+	shard.Lock()
+	actual, loaded = shard.items[key]
+	if !loaded {
+		shard.items[key] = value
+		actual = value
+	}
+	shard.Unlock()
+	return actual, loaded
 }
 
 // Callback to return new element to be inserted into the map
@@ -92,9 +119,8 @@ func (m ConcurrentMap[K, V]) Upsert(key K, value V, cb UpsertCb[V]) (res V) {
 	return res
 }
 
-// Sets the given value under the specified key if no value was associated with it.
-func (m ConcurrentMap[K, V]) SetIfAbsent(key K, value V) bool {
-	// Get map shard.
+// Stores the given value under the specified key if no value was associated with it.
+func (m ConcurrentMap[K, V]) StoreIfAbsent(key K, value V) bool {
 	shard := m.GetShard(key)
 	shard.Lock()
 	_, ok := shard.items[key]
@@ -105,8 +131,8 @@ func (m ConcurrentMap[K, V]) SetIfAbsent(key K, value V) bool {
 	return !ok
 }
 
-// Get retrieves an element from map under given key.
-func (m ConcurrentMap[K, V]) Get(key K) (V, bool) {
+// Load retrieves an element from map under given key.
+func (m ConcurrentMap[K, V]) Load(key K) (V, bool) {
 	// Get shard
 	shard := m.GetShard(key)
 	shard.RLock()
@@ -119,7 +145,7 @@ func (m ConcurrentMap[K, V]) Get(key K) (V, bool) {
 // Count returns the number of elements within the map.
 func (m ConcurrentMap[K, V]) Count() int {
 	count := 0
-	for i := 0; i < SHARD_COUNT; i++ {
+	for i := 0; i < DefaultShardCount; i++ {
 		shard := m.shards[i]
 		shard.RLock()
 		count += len(shard.items)
@@ -140,7 +166,7 @@ func (m ConcurrentMap[K, V]) Has(key K) bool {
 }
 
 // Remove removes an element from the map.
-func (m ConcurrentMap[K, V]) Remove(key K) {
+func (m ConcurrentMap[K, V]) Delete(key K) {
 	// Try to get shard.
 	shard := m.GetShard(key)
 	shard.Lock()
@@ -215,7 +241,7 @@ func (m ConcurrentMap[K, V]) IterBuffered() <-chan Tuple[K, V] {
 // Clear removes all items from map.
 func (m ConcurrentMap[K, V]) Clear() {
 	for item := range m.IterBuffered() {
-		m.Remove(item.Key)
+		m.Delete(item.Key)
 	}
 }
 
@@ -228,9 +254,9 @@ func snapshot[K comparable, V any](m ConcurrentMap[K, V]) (chans []chan Tuple[K,
 	if len(m.shards) == 0 {
 		panic(`cmap.ConcurrentMap is not initialized. Should run New() before usage.`)
 	}
-	chans = make([]chan Tuple[K, V], SHARD_COUNT)
+	chans = make([]chan Tuple[K, V], DefaultShardCount)
 	wg := sync.WaitGroup{}
-	wg.Add(SHARD_COUNT)
+	wg.Add(DefaultShardCount)
 	// Foreach shard.
 	for index, shard := range m.shards {
 		go func(index int, shard *ConcurrentMapShared[K, V]) {
@@ -303,7 +329,7 @@ func (m ConcurrentMap[K, V]) Keys() []K {
 	go func() {
 		// Foreach shard.
 		wg := sync.WaitGroup{}
-		wg.Add(SHARD_COUNT)
+		wg.Add(DefaultShardCount)
 		for _, shard := range m.shards {
 			go func(shard *ConcurrentMapShared[K, V]) {
 				// Foreach key, value pair.
@@ -338,19 +364,32 @@ func (m ConcurrentMap[K, V]) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(tmp)
 }
-func strfnv32[K fmt.Stringer](key K) uint32 {
-	return fnv32(key.String())
+
+func fnv1a32HashFromStringer[K Stringer](key K) uint32 {
+	return fnv1a32Hash(key.String())
 }
 
-func fnv32(key string) uint32 {
-	hash := uint32(2166136261)
-	const prime32 = uint32(16777619)
-	keyLength := len(key)
-	for i := 0; i < keyLength; i++ {
-		hash *= prime32
+func fnv1a32Hash(key string) uint32 {
+	const (
+		prime32       uint32 = 16777619
+		offsetBasis32 uint32 = 2166136261
+	)
+
+	hash := offsetBasis32
+	for i := 0; i < len(key); i++ {
 		hash ^= uint32(key[i])
+		hash *= prime32
 	}
 	return hash
+}
+
+func splitMix64Hash[K Integer](key K) uint32 {
+	k := uint64(key)
+	z := k + 0x9e3779b97f4a7c15
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+	z = z ^ (z >> 31)
+	return uint32(z ^ (z >> 32))
 }
 
 // Reverse process of Marshal.
@@ -364,7 +403,7 @@ func (m *ConcurrentMap[K, V]) UnmarshalJSON(b []byte) (err error) {
 
 	// foreach key,value pair in temporary map insert into our concurrent map.
 	for key, val := range tmp {
-		m.Set(key, val)
+		m.Store(key, val)
 	}
 	return nil
 }
