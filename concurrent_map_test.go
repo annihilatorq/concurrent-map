@@ -21,6 +21,15 @@ func TestMapCreation(t *testing.T) {
 	if m.Count() != 0 {
 		t.Error("new map should be empty.")
 	}
+
+	if m.ShardCount() != DefaultShardCount {
+		t.Error("map contains invalid shard count")
+	}
+
+	m2 := NewString[string](0)
+	if m2.ShardCount() != DefaultShardCount {
+		t.Error("zero shard count should be defaulted")
+	}
 }
 
 func TestIntegerMap(t *testing.T) {

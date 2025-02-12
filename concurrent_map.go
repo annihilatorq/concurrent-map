@@ -25,7 +25,7 @@ type Stringer interface {
 // To avoid lock bottlenecks this map is dived to several (DefaultShardCount) map shards.
 type ConcurrentMap[K comparable, V any] struct {
 	shards []*ConcurrentMapShared[K, V]
-	hasher func(key K) uint32
+	hasher Hasher[K]
 }
 
 // A "thread" safe string to anything map.
