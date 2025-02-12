@@ -1,4 +1,4 @@
-module github.com/orcaman/concurrent-map/v2
+module github.com/annihilatorq/concurrent-map
 
 go 1.22.0
 
