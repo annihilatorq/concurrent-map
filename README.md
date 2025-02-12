@@ -1,4 +1,5 @@
-slightly modified version of concurrent-map, the interface of main functions is adjusted to sync.Map (for consistency with the standard), and also added functionality for hashing integer-type keys (in the original version each integer should be converted to a string, and then hashed with fnv1). in this version fnv1 is replaced by fnv1a, and hashing of integer types is performed with splitmix64.
+Slightly modified version of concurrent-map, the interface of main functions is adjusted to sync.Map (for consistency with the standard), and also added functionality for hashing integer-type keys (in the original version each integer should be converted to a string, and then hashed with fnv1). in this version fnv1 is replaced by fnv1a, and hashing of integer types is performed with splitmix64.
+
 ---
 As explained [here](http://golang.org/doc/faq#atomic_maps) and [here](http://blog.golang.org/go-maps-in-action), the `map` type in Go doesn't support concurrent reads and writes. `concurrent-map` provides a high-performance solution to this by sharding the map with minimal time spent waiting for locks.
 
