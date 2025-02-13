@@ -11,13 +11,13 @@ Import the package:
 
 ```go
 import (
-	cmap "github.com/annihilatorq/concurrent-map@v1.1.0"
+	cmap "github.com/annihilatorq/concurrent-map"
 )
 
 ```
 
 ```bash
-go get github.com/annihilatorq/concurrent-map
+go get github.com/annihilatorq/concurrent-map@v1.1.0
 ```
 
 The package is now imported under the "cmap" namespace.
